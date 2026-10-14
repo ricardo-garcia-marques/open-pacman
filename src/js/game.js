@@ -13,6 +13,20 @@ const OPPOSITE = { left: 'right', right: 'left', up: 'down', down: 'up' };
 const PACMAN_SPEED = 0.125; // 1/8 celda/frame -> alinea cada 8 frames
 const GHOST_SPEED = 0.1;    // 1/10 celda/frame
 
+const POWER_DURATION = 360; // frames de modo power (6s a 60fps)
+const FRIGHTENED_SPEED = 1 / 12; // ~83% de GHOST_SPEED; 1/n alinea cada celda
+const FRIGHTENED_BLINK = 120;  // frames finales con parpadeo (2s)
+const RESPAWN_DELAY = 120;     // frames en pen tras ser comido
+const GHOST_SCORES = [200, 400, 800, 1600]; // por orden de comida en el modo
+
+// Esquina de huida por kind durante el modo power.
+const FRIGHTENED_CORNERS = {
+  hunter  : { x: 26, y: 1 },
+  ambusher: { x: 1 , y: 1 },
+  flanker : { x: 26, y: 29 },
+  shy     : { x: 1 , y: 29 },
+};
+
 // Casilla de la puerta de la pen: los fantasmas liberados aparecen aqui.
 const GHOST_DOOR = { x: 13, y: 12 };
 
@@ -31,7 +45,7 @@ function createGame() {
   grid[ PACMAN_START.y ][ PACMAN_START.x ] = 0;
 
   let dots = 0;
-  for ( const row of grid ) for ( const v of row ) if ( v === 2 ) dots++;
+  for ( const row of grid ) for ( const v of row ) if ( v === 2 || v === 4 ) dots++;
 
   return {
     state: 'start',
@@ -55,6 +69,8 @@ function createGame() {
       kind: g.kind,
       releaseAt: g.exitDelay,
     } ) ),
+    powerTimer: 0,
+    ghostsEaten: 0,
   };
 }
 
@@ -119,11 +135,18 @@ function movePacman( game ) {
       p.dir = p.nextDir;
       p.nextDir = null;
     }
-    // Comer dot.
-    if ( grid[ p.y ][ p.x ] === 2 ) {
+    // Comer dot o power-pellet.
+    const tile = grid[ p.y ][ p.x ];
+    if ( tile === 2 || tile === 4 ) {
       grid[ p.y ][ p.x ] = 0;
-      game.score += 10;
+      game.score += tile === 4 ? 50 : 10;
       game.dotsRemaining--;
+    }
+    if ( tile === 4 ) {
+      game.powerTimer = POWER_DURATION;
+      game.ghostsEaten = 0;
+      // Nueva oleada: los revividos del modo anterior vuelven a asustarse.
+      game.ghosts.forEach( ( o ) => { o.revived = false; } );
     }
     // Si no puede seguir, se detiene en la celda.
     if ( !canMove( grid, p.x, p.y, p.dir, 'pacman' ) ) return;
@@ -174,6 +197,11 @@ const GHOST_TARGETS = {
     if ( dist < 8 ) return { x: 1, y: 29 };
     return { x: px, y: py };
   },
+
+  // Modo power: todos huyen a la esquina fijada por su kind.
+  frightened( game, g ) {
+    return FRIGHTENED_CORNERS[ g.kind ] || FRIGHTENED_CORNERS.hunter;
+  },
 };
 
 function chooseDirTowards( game, g, choices, tx, ty ) {
@@ -208,14 +236,25 @@ function decideGhost( game, g ) {
   // Sin salida (callejon): permitir el giro de 180.
   const choices = options.length ? options : [ '' + OPPOSITE[ g.dir ] ];
 
-  const targetFn = GHOST_TARGETS[ g.kind ] || GHOST_TARGETS.hunter;
-  const target = targetFn( game, g );
+  const targetFn = isFrightened( game, g ) ? GHOST_TARGETS.frightened : null;
+  const target = ( targetFn || GHOST_TARGETS[ g.kind ] || GHOST_TARGETS.hunter )( game, g );
   g.dir = chooseDirTowards( game, g, choices, target.x, target.y );
 }
 
 function moveGhost( game, g ) {
   const grid = game.grid;
   const width = grid[ 0 ].length;
+  const target = isFrightened( game, g ) ? FRIGHTENED_SPEED : GHOST_SPEED;
+  if ( target !== g.speed ) {
+    // Cambio de velocidad (entrar/salir del modo): si no esta alineado,
+    // ajustar al centro de celda mas cercano para no perder el chequeo de
+    // muros (esta a menos de media celda de un centro ya validado).
+    g.speed = target;
+    if ( !( aligned( g.x ) && aligned( g.y ) ) ) {
+      g.x = Math.round( g.x );
+      g.y = Math.round( g.y );
+    }
+  }
 
   if ( aligned( g.x ) && aligned( g.y ) ) {
     g.x = Math.round( g.x );
@@ -248,9 +287,19 @@ function collides( a, b ) {
   return Math.abs( a.x - b.x ) < 0.5 && Math.abs( a.y - b.y ) < 0.5;
 }
 
+// Asustado si hay modo power y el fantasma esta activo fuera del pen
+// (los que esperan respawn, frame < releaseAt, no se mueven ni colisionan).
+// Los revividos (comidos y regresados al pen durante este modo) salen ya
+// normales: no vuelven a asustarse hasta que una pellet nueva reactive el modo.
+function isFrightened( game, g ) {
+  return game.powerTimer > 0 && game.frame >= g.releaseAt && !g.revived;
+}
+
 function update( game ) {
   game.frame++;
   movePacman( game );
+
+  if ( game.powerTimer > 0 ) game.powerTimer--;
 
   // Liberacion escalonada del pen: si frame < releaseAt no se mueve ni
   // colisiona; al llegar su frame se coloca en la puerta y sale hacia arriba.
@@ -267,15 +316,31 @@ function update( game ) {
 
   const active = game.ghosts.filter( ( g ) => game.frame >= g.releaseAt );
   for ( const g of active ) {
-    if ( collides( game.pacman, g ) ) {
-      game.lives--;
-      if ( game.lives <= 0 ) {
-        game.state = 'lost';
-        return;
-      }
-      resetPositions( game );
-      break;
+    if ( !collides( game.pacman, g ) ) continue;
+
+    // Modo power: no se puede morir; el contacto come al fantasma.
+    if ( game.powerTimer > 0 && isFrightened( game, g ) ) {
+      game.score += GHOST_SCORES[ Math.min( game.ghostsEaten, 3 ) ];
+      game.ghostsEaten++;
+      const i = game.ghosts.indexOf( g );
+      const s = GHOST_STARTS[ i ];
+      g.x = s.x;
+      g.y = s.y;
+      g.dir = 'up';
+      g.speed = GHOST_SPEED;
+      g.releaseAt = game.frame + RESPAWN_DELAY;
+      g.revived = true; // sale ya normal aunque el modo siga activo
+      continue;
     }
+
+    game.lives--;
+    if ( game.lives <= 0 ) {
+      game.state = 'lost';
+      return;
+    }
+    resetPositions( game );
+    game.powerTimer = 0;
+    break;
   }
 
   if ( game.dotsRemaining <= 0 ) game.state = 'won';
@@ -284,3 +349,5 @@ function update( game ) {
 window.createGame = createGame;
 window.update = update;
 window.DIRS = DIRS;
+window.isFrightened = isFrightened;
+window.FRIGHTENED_BLINK = FRIGHTENED_BLINK;

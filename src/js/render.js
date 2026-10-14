@@ -5,6 +5,7 @@ const TILE = 20;
 const WALL_COLOR = '#2121ff';
 const DOOR_COLOR = '#ffb8ff';
 const DOT_COLOR = '#ffb897';
+const FRIGHTENED_COLOR = '#2121de'; // azul oscuro del parpadeo final
 
 function cellCenter( x, y ) {
   return { cx: x * TILE + TILE / 2, cy: y * TILE + TILE / 2 };
@@ -70,10 +71,11 @@ function drawDots( ctx, grid ) {
   ctx.fillStyle = DOT_COLOR;
   for ( let y = 0; y < grid.length; y++ ) {
     for ( let x = 0; x < grid[ 0 ].length; x++ ) {
-      if ( grid[ y ][ x ] !== 2 ) continue;
+      const v = grid[ y ][ x ];
+      if ( v !== 2 && v !== 4 ) continue;
       const { cx, cy } = cellCenter( x, y );
       ctx.beginPath();
-      ctx.arc( cx, cy, 2.5, 0, Math.PI * 2 );
+      ctx.arc( cx, cy, v === 4 ? 7 : 2.5, 0, Math.PI * 2 );
       ctx.fill();
     }
   }
@@ -164,7 +166,18 @@ function draw( ctx, game, frame ) {
   drawDoor( ctx, grid );
   drawDots( ctx, grid );
   drawPacman( ctx, game.pacman, frame );
-  game.ghosts.forEach( ( g ) => drawGhost( ctx, g, GHOST_COLORS[ g.kind ] || '#ff0000' ) );
+
+  // Fantasma asustado: blanco, o parpadeando blanco/azul oscuro cada 10
+  // frames en los ultimos FRIGHTENED_BLINK frames del modo.
+  const blinking = game.powerTimer > 0 && game.powerTimer <= FRIGHTENED_BLINK;
+  game.ghosts.forEach( ( g ) => {
+    let color = GHOST_COLORS[ g.kind ] || '#ff0000';
+    if ( window.isFrightened( game, g ) ) {
+      const white = !blinking || Math.floor( frame / 10 ) % 2 === 0;
+      color = white ? '#ffffff' : FRIGHTENED_COLOR;
+    }
+    drawGhost( ctx, g, color );
+  } );
   drawHUD( ctx, game, W );
 }
 
